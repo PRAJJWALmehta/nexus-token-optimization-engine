@@ -37,11 +37,9 @@ The upstream target is any OpenAI-compatible API (e.g., OpenAI, Anthropic via pr
 - *aiohttp.ClientSession*: Viable but inconsistent API style with FastAPI's ecosystem.
 - *requests + threading*: Blocks the event loop — unacceptable for a streaming proxy.
 
-### 3. sse-starlette for SSE streaming to the client
-**Choice**: `sse-starlette` to produce `text/event-stream` responses.
-**Rationale**: Integrates directly with Starlette's `StreamingResponse`. Handles SSE framing (`data:`, `event:`, keep-alive) correctly, avoiding hand-rolled chunked transfer bugs.
-**Alternatives considered**:
-- *Raw StreamingResponse*: Works, but requires manual SSE framing and is error-prone.
+### 3. Server-Sent Events (SSE) Streaming
+- **Choice:** FastAPI's native `StreamingResponse`.
+- **Rationale:** Since the proxy's goal is strictly pass-through efficiency, and the upstream provider (OpenAI) already perfectly formats the SSE chunks (`data: {...}\n\n`), using `StreamingResponse` allows us to yield those raw bytes directly to the client with zero processing overhead. We evaluated `sse-starlette` initially, but it requires decoding the stream into objects only to re-encode them, which is unnecessarily inefficient for a transparent proxy.
 
 ### 4. Tenant extraction via API key prefix convention
 **Choice**: Parse the API key from the `Authorization: Bearer <key>` header. The tenant ID is the segment before the first `_` delimiter (e.g., `tenant123_sk-abc...` → tenant `tenant123`). If no prefix is found, default to `default`.
