@@ -40,14 +40,14 @@ class ChatCompletionRequest(BaseModel):
     model: str
     messages: list[ChatMessage]
     stream: bool = False
-    temperature: float = None
-    max_tokens: int = None
-    top_p: float = None
-    stop: Union[str, list[str]] = None
-    n: int = None
-    frequency_penalty: float = None
-    presence_penalty: float = None
-    user: str = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+    stop: Optional[Union[str, list[str]]] = None
+    n: Optional[int] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    user: Optional[str] = None
 
     model_config = {"extra": "allow"}
 

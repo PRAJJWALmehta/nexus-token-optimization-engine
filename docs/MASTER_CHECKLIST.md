@@ -19,7 +19,7 @@ This checklist breaks down the Master PRD into small, testable OpenSpec changes.
 
 - [ ] **Change**: `semantic-caching`
   - `all-MiniLM-L6-v2` local embedding engine (embed last user message)
-  - Redis with RediSearch vector index
+  - Redis with RediSearch vector index (running via OrbStack)
   - Cache key builder (tenant_id + sys_prompt_hash + model + temp_bucket + ctx_hash)
   - Semantic cache lookup (embed → filtered ANN → context_hash verify)
   - Streamed response buffering + cache store on completion
