@@ -34,6 +34,6 @@ This document tracks design decisions, enhancements, and features that have been
 - [ ] **Database Setup**: Introduce a data store (like Redis for caching, PostgreSQL/Redis for rate-limiting counters and tenant metadata storage).
 
 ### Operations & CI/CD
-- [ ] **Dockerization**: Create a `Dockerfile` and `docker-compose.yml` for simplified orchestration.
+- [x] **Dockerization**: Create a `Dockerfile` and `docker-compose.yml` for simplified orchestration (using OrbStack).
 - [ ] **CI/CD Pipeline**: Configure GitHub Actions for linting, automated testing, and deployment.
 - [ ] **Production Deployment Configuration**: Define production-ready Uvicorn settings, reverse proxy settings (like Nginx/Traefik), and TLS/HTTPS configuration.
