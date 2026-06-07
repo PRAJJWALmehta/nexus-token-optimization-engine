@@ -30,6 +30,12 @@ from src.exceptions import register_exception_handlers
 from src.middleware.tenant import TenantExtractionMiddleware
 from src.routers import chat, health
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
 logger = logging.getLogger(__name__)
 
 

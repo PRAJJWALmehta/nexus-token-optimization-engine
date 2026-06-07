@@ -27,6 +27,17 @@ class Settings(BaseSettings):
     cache_similarity_threshold: float = 0.95
     cache_max_response_bytes: int = 524288  # 512 KB
 
+    # Dynamic routing
+    routing_enabled: bool = True
+    routing_trigger_model: str = "auto"
+    routing_token_threshold: int = 2000
+    routing_low_model: str = "claude-sonnet-4-20250514"
+    routing_high_model: str = "claude-opus-4-0520"
+    # Comma-separated list of high-complexity keywords (whole-word matched)
+    routing_complexity_keywords: str = (
+        "refactor,architect,design,optimize,analyze,debug,review,explain"
+    )
+
 
 # Module-level singleton — imported by other modules
 settings = Settings()
