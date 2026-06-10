@@ -38,6 +38,14 @@ class Settings(BaseSettings):
         "refactor,architect,design,optimize,analyze,debug,review,explain"
     )
 
+    # Prompt pruning
+    pruning_enabled: bool = True
+    pruning_token_budget: int = 16000  # max estimated tokens per request; 0 = unlimited
+    pruning_normalize_whitespace: bool = True
+    pruning_strip_comments: bool = True
+    pruning_deduplicate_system: bool = True
+    pruning_truncate_conversation: bool = True
+
 
 # Module-level singleton — imported by other modules
 settings = Settings()
