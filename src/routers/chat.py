@@ -1,17 +1,25 @@
 """Chat completions router.
 
 Exposes ``POST /v1/chat/completions`` which accepts OpenAI-compatible requests
-and — depending on the routing and cache state — either:
+and — depending on the routing, pruning, and cache state — either:
 
-* **Routing + Cache HIT**:  Replays the cached response (SSE or JSON) without
-  touching the upstream provider.  Response carries ``X-Cache: HIT`` and
-  ``X-Cached-Model: <resolved-model>`` when the request was routed.
-* **Routing + Cache MISS**:  Forwards to the configured upstream provider with
-  the resolved model, buffers the response stream for cache persistence.
+* **Routing + Pruning + Cache HIT**:  Replays the cached response (SSE or JSON)
+  without touching the upstream provider.  Response carries ``X-Cache: HIT`` and
+  ``X-Cached-Model: <resolved-model>`` when the request was routed, plus pruning
+  headers when pruning was applied.
+* **Routing + Pruning + Cache MISS**:  Forwards to the configured upstream provider
+  with the resolved model, buffers the response stream for cache persistence.
   Response carries ``X-Cache: MISS`` and ``X-Routed-Model: <resolved-model>``.
 * **Cache BYPASS**: When caching is disabled via config, passes straight through.
   Response carries ``X-Cache: BYPASS`` (plus ``X-Routed-Model`` if routed).
 * **Routing disabled + trigger model**: Returns ``400 Bad Request`` immediately.
+
+Request pipeline:
+  Client → TenantMiddleware → ChatRouter
+        → [0] ModelRouter (optional)
+        → [1] PruningPipeline (optional, after routing, before cache)
+        → [2] CacheLookup (optional)
+        → [3] ProviderAdapter → Upstream
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ from src.config import Settings, settings
 from src.models.chat import ChatCompletionRequest, GatewayErrorDetail, GatewayErrorResponse
 from src.providers.base import ProviderAdapter
 from src.providers.openai import OpenAIProviderAdapter
+from src.pruning.pipeline import PruningPipeline, PruningResult
 from src.routing.router import ModelRouter, RoutingDisabledError, RoutingResult
 
 logger = logging.getLogger(__name__)
@@ -70,6 +79,28 @@ def get_model_router() -> ModelRouter:
 
 
 # ---------------------------------------------------------------------------
+# Pruning pipeline dependency
+# ---------------------------------------------------------------------------
+
+
+def get_pruning_pipeline() -> Optional[PruningPipeline]:
+    """Return a :class:`PruningPipeline` instance when pruning is enabled.
+
+    Returns ``None`` when ``PRUNING_ENABLED=false`` so the route handler
+    skips pruning transparently.
+    """
+    if not settings.pruning_enabled:
+        return None
+    return PruningPipeline(
+        normalize_whitespace=settings.pruning_normalize_whitespace,
+        strip_comments=settings.pruning_strip_comments,
+        deduplicate_system=settings.pruning_deduplicate_system,
+        truncate_conversation=settings.pruning_truncate_conversation,
+        token_budget=settings.pruning_token_budget,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Route
 # ---------------------------------------------------------------------------
 
@@ -81,11 +112,13 @@ async def chat_completions(
     provider: Annotated[ProviderAdapter, Depends(get_provider)],
     cache_lookup: Annotated[Optional[CacheLookup], Depends(get_cache_lookup)],
     model_router: Annotated[ModelRouter, Depends(get_model_router)],
+    pruning_pipeline: Annotated[Optional[PruningPipeline], Depends(get_pruning_pipeline)],
 ):
     """Proxy chat completions to the upstream LLM provider.
 
     Request flow:
-    1. Dynamic routing (optional) — resolves ``model: "auto"`` before cache.
+    0. Dynamic routing (optional) — resolves ``model: "auto"`` before pruning/cache.
+    1. Prompt pruning (optional) — reduces token count before cache key computation.
     2. Cache check — returns cached response on HIT.
     3. Upstream forward — on MISS/BYPASS, forward to provider and cache result.
 
@@ -93,11 +126,13 @@ async def chat_completions(
     - ``X-Cache``: HIT / MISS / BYPASS
     - ``X-Routed-Model``: resolved model name (cache MISS/BYPASS, routed only)
     - ``X-Cached-Model``: resolved model name (cache HIT, routed only)
+    - ``X-Tokens-Saved``: integer tokens saved by pruning (when pruning enabled)
+    - ``X-Pruning-Applied``: comma-separated transforms applied (when pruning enabled)
     """
     tenant_id: str = getattr(request.state, "tenant_id", "default")
 
     # ------------------------------------------------------------------ #
-    #  0.  Dynamic routing (before cache — resolves model in place)       #
+    #  0.  Dynamic routing (before pruning/cache — resolves model)        #
     # ------------------------------------------------------------------ #
     routing_result: RoutingResult = RoutingResult(routed_model=None)
     try:
@@ -115,7 +150,15 @@ async def chat_completions(
         )
 
     # ------------------------------------------------------------------ #
-    #  1.  Cache check (skipped when lookup is None / disabled)           #
+    #  1.  Prompt pruning (after routing, before cache)                   #
+    # ------------------------------------------------------------------ #
+    pruning_result: Optional[PruningResult] = None
+    if pruning_pipeline is not None:
+        pruning_result = pruning_pipeline.run(request_data, tenant_id=tenant_id)
+        request_data = pruning_result.request  # operate on pruned request from here
+
+    # ------------------------------------------------------------------ #
+    #  2.  Cache check (skipped when lookup is None / disabled)           #
     # ------------------------------------------------------------------ #
     result: CacheResult | None = None
     client_cache_control = request.headers.get("cache-control", "").lower()
@@ -132,6 +175,9 @@ async def chat_completions(
             hit_headers = {"X-Cache": "HIT"}
             if routing_result.was_routed:
                 hit_headers["X-Cached-Model"] = routing_result.routed_model
+            if pruning_result is not None:
+                hit_headers["X-Tokens-Saved"] = str(pruning_result.tokens_saved)
+                hit_headers["X-Pruning-Applied"] = ",".join(pruning_result.transforms_applied)
 
             if request_data.stream:
                 return StreamingResponse(
@@ -146,7 +192,7 @@ async def chat_completions(
                 )
 
     # ------------------------------------------------------------------ #
-    #  2.  Cache MISS or BYPASS — forward to upstream                     #
+    #  3.  Cache MISS or BYPASS — forward to upstream                     #
     # ------------------------------------------------------------------ #
     client_bypassed = (
         "no-cache" in client_cache_control or "no-store" in client_cache_control
@@ -159,6 +205,9 @@ async def chat_completions(
     extra_headers: dict[str, str] = {"X-Cache": x_cache_header}
     if routing_result.was_routed:
         extra_headers["X-Routed-Model"] = routing_result.routed_model
+    if pruning_result is not None:
+        extra_headers["X-Tokens-Saved"] = str(pruning_result.tokens_saved)
+        extra_headers["X-Pruning-Applied"] = ",".join(pruning_result.transforms_applied)
 
     if request_data.stream:
         # Build the on_complete callback to persist the response after delivery
