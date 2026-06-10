@@ -44,6 +44,10 @@ class OpenAIProviderAdapter:
         self._api_key = settings.upstream_api_key
         self._timeout = settings.upstream_timeout
 
+    @property
+    def name(self) -> str:
+        return "openai"
+
     async def stream_completions(
         self, request: ChatCompletionRequest
     ) -> AsyncIterator[bytes]:
