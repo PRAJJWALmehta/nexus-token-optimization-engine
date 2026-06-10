@@ -29,6 +29,10 @@ class ProviderAdapter(Protocol):
         forwarded verbatim to the client.
     """
 
+    @property
+    def name(self) -> str:
+        ...
+
     async def stream_completions(
         self, request: ChatCompletionRequest
     ) -> AsyncIterator[bytes]:

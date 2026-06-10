@@ -118,6 +118,8 @@ class CacheLookup:
             # Step 3: ANN search with metadata filter
             entry = await self._store.search(key, query_vector)
             if entry is None:
+                from src.telemetry import cache_misses_total
+                cache_misses_total.labels(model=key.model).inc()
                 return CacheResult(hit=False, key=key)
 
             # Step 4: context hash verification (second gate)
@@ -127,6 +129,8 @@ class CacheLookup:
                     "(score=%.4f)",
                     entry.score,
                 )
+                from src.telemetry import cache_misses_total
+                cache_misses_total.labels(model=key.model).inc()
                 return CacheResult(hit=False, key=key)
 
             logger.info(
@@ -135,6 +139,28 @@ class CacheLookup:
                 key.model,
                 entry.score,
             )
+
+            # Telemetry instrumentation
+            from src.telemetry import cache_hits_total, tokens_saved_total
+            from src.pruning.truncation import _estimate_total_tokens
+            import json
+
+            cache_hits_total.labels(model=key.model).inc()
+
+            prompt_tokens = _estimate_total_tokens(request.messages)
+            completion_tokens = 0
+            if not entry.stream:
+                try:
+                    data = json.loads(entry.response.decode("utf-8", errors="replace"))
+                    completion_tokens = data.get("usage", {}).get("completion_tokens", 0)
+                except Exception:
+                    completion_tokens = len(entry.response) // 4
+            else:
+                completion_tokens = len(entry.response) // 4
+
+            tokens_saved = prompt_tokens + completion_tokens
+            tokens_saved_total.labels(model=key.model, source="caching").inc(tokens_saved)
+
             return CacheResult(
                 hit=True,
                 cached_response=entry.response,

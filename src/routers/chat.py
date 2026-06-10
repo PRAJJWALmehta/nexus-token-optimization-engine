@@ -129,7 +129,16 @@ async def chat_completions(
     - ``X-Tokens-Saved``: integer tokens saved by pruning (when pruning enabled)
     - ``X-Pruning-Applied``: comma-separated transforms applied (when pruning enabled)
     """
+    import time
+    start_time = time.perf_counter()
+
     tenant_id: str = getattr(request.state, "tenant_id", "default")
+
+    from src.pruning.truncation import _estimate_total_tokens
+    from src.telemetry import tokens_processed_total
+    
+    total_tokens_est = _estimate_total_tokens(request_data.messages)
+    tokens_processed_total.labels(model=request_data.model).inc(total_tokens_est)
 
     # ------------------------------------------------------------------ #
     #  0.  Dynamic routing (before pruning/cache — resolves model)        #
@@ -138,6 +147,8 @@ async def chat_completions(
     try:
         routing_result = model_router.resolve(request_data)
     except RoutingDisabledError as exc:
+        from src.telemetry import gateway_latency_seconds
+        gateway_latency_seconds.observe(time.perf_counter() - start_time)
         return JSONResponse(
             status_code=400,
             content=GatewayErrorResponse(
@@ -157,11 +168,37 @@ async def chat_completions(
         pruning_result = pruning_pipeline.run(request_data, tenant_id=tenant_id)
         request_data = pruning_result.request  # operate on pruned request from here
 
+        # Record tokens saved by pruning
+        if pruning_result.tokens_saved > 0:
+            from src.telemetry import tokens_saved_total
+            tokens_saved_total.labels(model=request_data.model, source="pruning").inc(pruning_result.tokens_saved)
+
     # ------------------------------------------------------------------ #
     #  2.  Cache check (skipped when lookup is None / disabled)           #
     # ------------------------------------------------------------------ #
     result: CacheResult | None = None
     client_cache_control = request.headers.get("cache-control", "").lower()
+
+    # Latency tracking wrappers for streaming responses
+    async def track_gateway_latency_stream(gen):
+        try:
+            async for chunk in gen:
+                yield chunk
+        finally:
+            from src.telemetry import gateway_latency_seconds
+            gateway_latency_seconds.observe(time.perf_counter() - start_time)
+
+    async def track_provider_latency_stream(gen):
+        prov_start = time.perf_counter()
+        try:
+            async for chunk in gen:
+                yield chunk
+        finally:
+            from src.telemetry import provider_latency_seconds
+            provider_latency_seconds.labels(
+                provider=getattr(provider, "name", "openai"),
+                model=request_data.model
+            ).observe(time.perf_counter() - prov_start)
 
     if (
         cache_lookup is not None
@@ -181,11 +218,13 @@ async def chat_completions(
 
             if request_data.stream:
                 return StreamingResponse(
-                    replay_sse_stream(result.cached_response),
+                    track_gateway_latency_stream(replay_sse_stream(result.cached_response)),
                     media_type="text/event-stream",
                     headers=hit_headers,
                 )
             else:
+                from src.telemetry import gateway_latency_seconds
+                gateway_latency_seconds.observe(time.perf_counter() - start_time)
                 return replay_json_response(
                     result.cached_response,
                     extra_headers=hit_headers,
@@ -210,25 +249,41 @@ async def chat_completions(
         extra_headers["X-Pruning-Applied"] = ",".join(pruning_result.transforms_applied)
 
     if request_data.stream:
-        # Build the on_complete callback to persist the response after delivery
-        async def _persist_stream(data: bytes) -> None:
+        # Build the on_complete callback to persist response & record telemetry after delivery
+        async def _stream_complete(data: bytes) -> None:
             if cache_lookup is not None and result is not None and result.key is not None:
                 await cache_lookup.store(result.key, request_data, data, stream=True)
+            if routing_result.was_routed and routing_result.routed_model == settings.routing_low_model:
+                from src.pruning.truncation import _estimate_total_tokens
+                prompt_tokens = _estimate_total_tokens(request_data.messages)
+                completion_tokens = len(data) // 4
+                total_tokens = prompt_tokens + completion_tokens
+                routing_savings = int(total_tokens * 0.8)
+                from src.telemetry import tokens_saved_total
+                tokens_saved_total.labels(model=routing_result.routed_model, source="routing").inc(routing_savings)
 
         buffered = StreamBuffer(
-            provider.stream_completions(request_data),
-            on_complete=_persist_stream if cache_lookup is not None else None,
+            track_provider_latency_stream(provider.stream_completions(request_data)),
+            on_complete=_stream_complete,
         )
         return StreamingResponse(
-            buffered,
+            track_gateway_latency_stream(buffered),
             media_type="text/event-stream",
             headers=extra_headers,
         )
     else:
         # Non-streaming: collect response then optionally cache it
         chunks = []
+        prov_start = time.perf_counter()
         async for chunk in provider.stream_completions(request_data):
             chunks.append(chunk)
+
+        prov_duration = time.perf_counter() - prov_start
+        from src.telemetry import provider_latency_seconds
+        provider_latency_seconds.labels(
+            provider=getattr(provider, "name", "openai"),
+            model=request_data.model
+        ).observe(prov_duration)
 
         body = b"".join(chunks)
 
@@ -238,6 +293,24 @@ async def chat_completions(
             asyncio.create_task(
                 cache_lookup.store(result.key, request_data, body, stream=False)
             )
+
+        # Record model routing savings for non-streaming request
+        if routing_result.was_routed and routing_result.routed_model == settings.routing_low_model:
+            from src.pruning.truncation import _estimate_total_tokens
+            prompt_tokens = _estimate_total_tokens(request_data.messages)
+            completion_tokens = 0
+            try:
+                data = json.loads(body.decode("utf-8", errors="replace"))
+                completion_tokens = data.get("usage", {}).get("completion_tokens", 0)
+            except Exception:
+                completion_tokens = len(body) // 4
+            total_tokens = prompt_tokens + completion_tokens
+            routing_savings = int(total_tokens * 0.8)
+            from src.telemetry import tokens_saved_total
+            tokens_saved_total.labels(model=routing_result.routed_model, source="routing").inc(routing_savings)
+
+        from src.telemetry import gateway_latency_seconds
+        gateway_latency_seconds.observe(time.perf_counter() - start_time)
 
         return JSONResponse(
             content=json.loads(body),

@@ -122,6 +122,10 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(chat.router)
 
+    # 4. Mount Prometheus metrics endpoint
+    from prometheus_client import make_asgi_app
+    app.mount("/metrics", make_asgi_app())
+
     return app
 
 
