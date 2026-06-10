@@ -7,16 +7,18 @@ This document tracks design decisions, enhancements, and features that have been
 ## 📋 Postponed Features & Phases
 
 ### Phase 2–4: Optimization Engine
-- [ ] **Prompt Caching**: Cache repeated prompts per tenant to avoid redundant upstream execution and save cost.
-- [ ] **Prompt Pruning**: Prune redundant tokens/messages from prompt histories before forwarding to the upstream model.
+- [x] **Prompt Caching**: Cache repeated prompts per tenant to avoid redundant upstream execution and save cost.
+- [x] **Prompt Pruning**: Prune redundant tokens/messages from prompt histories before forwarding to the upstream model.
+- [ ] **Aggressive Prompt Pruning**: Make compression more aggressive by lowering the default pruning token budget (e.g., to 4,000/8,000 tokens), stripping docstrings from code blocks, and removing HTML/Markdown comments globally.
 - [ ] **Request Modification**: Dynamically inject custom headers or parameters into upstream payloads.
 
 ### Phase 3: Routing & Cost Optimization
-- [ ] **Multi-Model Routing**: Implement intelligent request routing (e.g., route simpler prompts to cheaper models like GPT-4o-mini and complex prompts to GPT-4o).
+- [x] **Multi-Model Routing**: Implement intelligent request routing (e.g., route simpler prompts to cheaper models like GPT-4o-mini and complex prompts to GPT-4o).
 - [ ] **Cost Tracking & Budgeting**: Monitor token usage per tenant and apply rate limiting or budget enforcement when thresholds are exceeded.
 
 ### Phase 5: Observability & Telemetry
-- [ ] **Metrics Integration**: Export Prometheus metrics tracking latency, token usage, request counts, cache hit/miss rates, and error frequencies.
+- [x] **Metrics Integration**: Export Prometheus metrics tracking latency, token usage, request counts, cache hit/miss rates, and error frequencies.
+- [ ] **Grafana Dashboard Revamp**: Revamp layout into Executive ROI (savings breakdown, Cache vs Pruning ROI) and Ops views (P95/P99 latency, Cache Hit vs Miss latency, routing distribution stacked over time).
 - [ ] **OpenTelemetry Tracing**: Implement tracing to monitor the end-to-end request lifecycle and upstream performance.
 
 ---
