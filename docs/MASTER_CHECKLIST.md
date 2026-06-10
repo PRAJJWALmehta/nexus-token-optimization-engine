@@ -49,7 +49,7 @@ This checklist breaks down the Master PRD into small, testable OpenSpec changes.
 ## Phase 5: Telemetry & Observability 📊
 **Goal**: Measure cost savings, latency, and cache hit rates.
 
-- [ ] **Change**: `telemetry-instrumentation`
+- [x] **Change**: `telemetry-instrumentation`
   - Prometheus counters: `cache_hits_total`, `cache_misses_total`, `tokens_saved_total`
   - Prometheus histograms: `gateway_latency_seconds`, `provider_latency_seconds`
   - Routing distribution gauge: requests per model
