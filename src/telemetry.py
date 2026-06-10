@@ -47,3 +47,30 @@ requests_per_model = Gauge(
     "Active requests per model",
     ["model"]
 )
+
+# AST Extraction & Query Observability Metrics
+ast_queries_total = Counter(
+    "ast_queries_total",
+    "Total number of AST subgraph queries",
+    ["status"]
+)
+
+ast_query_latency_seconds = Histogram(
+    "ast_query_latency_seconds",
+    "Latency of AST subgraph queries in seconds",
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]
+)
+
+ast_extractions_total = Counter(
+    "ast_extractions_total",
+    "Total number of AST file extractions",
+    ["language", "status"]
+)
+
+ast_extraction_latency_seconds = Histogram(
+    "ast_extraction_latency_seconds",
+    "Latency of AST file extractions in seconds",
+    ["language"],
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+)
+
