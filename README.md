@@ -1,16 +1,40 @@
 # Nexus Token-Optimization Gateway
 
-A transparent, OpenAI-compatible reverse-proxy gateway that sits between LLM clients and upstream AI APIs. Layers in semantic caching, dynamic model routing, and (upcoming) prompt pruning to reduce cost without changing client code.
+A transparent, OpenAI-compatible reverse-proxy gateway that sits between LLM clients and upstream AI APIs. Layers in semantic caching, dynamic model routing, and prompt pruning to reduce cost without changing client code.
 
 ## Architecture
 
+The request/response lifecycle follows this sequence of operations:
+
 ```
-Client → POST /v1/chat/completions
-       → [TenantMiddleware]
-       → [ModelRouter]       ← Phase 3: Dynamic Routing
-       → [CacheLookup]       ← Phase 2: Semantic Caching
-       → [ProviderAdapter]
-       → Upstream LLM API
+                               Request Lifecycle
+                               
+     Client
+       │  POST /v1/chat/completions
+       ▼
+[TenantMiddleware]             (Extracts tenant identifier from API key)
+       │
+       ▼
+[ModelRouter] (Phase 3)        (Optional: Resolves model from "auto")
+       │
+       ▼
+[PruningPipeline] (Phase 4)    (Optional: Whitespace, comments, dedup, truncation)
+       │
+       ▼
+[CacheLookup] (Phase 2)        (Checks semantic cache for matching prompts)
+       ├───────────────── HIT ────────────────► [CacheReplay]
+       │                                             │
+      MISS / BYPASS                                  │ (Replay cached response)
+       ▼                                             ▼
+[ProviderAdapter]                                  Client
+       │
+       ▼ (Forward request to OpenAI / Upstream API)
+  Upstream LLM
+       │
+       ▼ (Buffer & Persist response back to cache)
+ [StreamBuffer] 
+       │
+       └──────────────────────────────────────► Client
 ```
 
 ## Getting Started
@@ -19,9 +43,10 @@ Client → POST /v1/chat/completions
 # Install dependencies
 pip install -e .
 
-# Configure upstream
+# Configure upstream and gateway settings (or use a .env file)
 export UPSTREAM_API_URL=https://api.openai.com/v1/chat/completions
 export UPSTREAM_API_KEY=sk-...
+export REDIS_URL=redis://localhost:6379
 
 # Run the gateway
 python -m src
@@ -29,29 +54,46 @@ python -m src
 
 The gateway will start on `http://localhost:8000`. Point any OpenAI-compatible client at it.
 
+---
+
+## Tenant Extraction & Multi-Tenancy
+
+The gateway automatically resolves the tenant ID from the `Authorization: Bearer <key>` header using the prefix before the first `_` delimiter:
+- `Authorization: Bearer tenantABC_sk-12345` ──► Tenant ID = `tenantABC`
+- `Authorization: Bearer sk-no-prefix` ──► Tenant ID = `default`
+- *(No authorization header)* ──► Tenant ID = `default`
+
+Downstream services, including semantic caching, use this tenant ID to isolate cache entries and data scopes per tenant.
+
+---
+
 ## Dynamic Routing (Phase 3)
 
 Send `model: "auto"` to let the gateway pick the right model for you based on request complexity.
 
 ```bash
-# Simple task → routed to Sonnet (cheap)
+# Simple task → routed to low-cost model (claude-sonnet-4-20250514)
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer tenantXYZ_sk-mock-key" \
   -d '{"model": "auto", "messages": [{"role": "user", "content": "Format this JSON: {}"}]}'
 # Response header: X-Routed-Model: claude-sonnet-4-20250514
 
-# Complex task → routed to Opus (capable)
+# Complex task → routed to capable model (claude-opus-4-0520)
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer tenantXYZ_sk-mock-key" \
   -d '{"model": "auto", "messages": [{"role": "user", "content": "Refactor this architecture for microservices"}]}'
 # Response header: X-Routed-Model: claude-opus-4-0520
 ```
 
 ### How routing works
 
-1. **Token count**: estimates tokens via `len(all_content) // 4`. At or above threshold → high model.
-2. **Keyword signals**: scans last user message + system messages for complexity keywords (whole-word). Any match → high model.
+1. **Token count**: estimates tokens via `len(relevant_messages_content) // 4` (only system messages and the last user message are analyzed). If it meets or exceeds `ROUTING_TOKEN_THRESHOLD` → high model.
+2. **Keyword signals**: scans system messages and the last user message for complexity keywords (whole-word, case-insensitive). Any match → high model.
 3. Explicit model names (anything other than `"auto"`) bypass routing entirely.
+
+---
 
 ## Prompt Pruning (Phase 4)
 
@@ -64,24 +106,47 @@ The gateway automatically prunes chat completion requests to reduce token consum
 3. **System Deduplication**: Deduplicates system messages with identical content (after whitespace-normalization), treating messages with different `name` fields as distinct.
 4. **Conversation Truncation**: Truncates older non-anchored messages when the request exceeds a token budget (default `16,000` tokens, estimated as `characters // 4`). The system message, first user message, and final message turn are always preserved.
 
-### Configuration
+---
+
+## Configuration
+
+The gateway is configured via environment variables or a `.env` file:
 
 | Env Var | Default | Description |
 |---|---|---|
+| **Upstream API Settings** | | |
+| `UPSTREAM_API_URL` | `https://api.openai.com/v1/chat/completions` | Upstream OpenAI-compatible chat completions endpoint URL |
+| `UPSTREAM_API_KEY` | `""` | Authorization key for upstream LLM provider |
+| `UPSTREAM_TIMEOUT` | `120.0` | Timeout in seconds for upstream requests |
+| **Server Settings** | | |
+| `HOST` | `0.0.0.0` | Listen host for the gateway |
+| `PORT` | `8000` | Listen port for the gateway |
+| **Semantic Caching Settings** | | |
+| `CACHE_ENABLED` | `true` | Master toggle for semantic caching |
+| `REDIS_URL` | `redis://localhost:6379` | Redis server connection URL (supports Redis Stack) |
+| `CACHE_TTL` | `3600` | Expiration time (in seconds) for cached responses |
+| `CACHE_SIMILARITY_THRESHOLD` | `0.95` | Cosine similarity threshold for semantic cache hits |
+| `CACHE_MAX_RESPONSE_BYTES` | `524288` | Maximum size in bytes of responses allowed to be cached (default: 512 KB) |
+| **Dynamic Routing Settings** | | |
 | `ROUTING_ENABLED` | `true` | Master toggle for dynamic routing |
 | `ROUTING_TRIGGER_MODEL` | `auto` | Model name that activates routing |
 | `ROUTING_TOKEN_THRESHOLD` | `2000` | Estimated token boundary for high complexity |
 | `ROUTING_LOW_MODEL` | `claude-sonnet-4-20250514` | Target model for low-complexity requests |
 | `ROUTING_HIGH_MODEL` | `claude-opus-4-0520` | Target model for high-complexity requests |
-| `ROUTING_COMPLEXITY_KEYWORDS` | `refactor,architect,...` | Comma-separated keyword list |
+| `ROUTING_COMPLEXITY_KEYWORDS` | `refactor,architect,design,optimize,analyze,debug,review,explain` | Comma-separated keyword list |
+| **Prompt Pruning Settings** | | |
 | `PRUNING_ENABLED` | `true` | Master toggle for prompt pruning |
 | `PRUNING_TOKEN_BUDGET` | `16000` | Estimated token budget per request; 0 = unlimited |
 | `PRUNING_NORMALIZE_WHITESPACE` | `true` | Enable whitespace normalization |
 | `PRUNING_STRIP_COMMENTS` | `true` | Enable stripping comments from code blocks |
-| `PRUNING_DEDUPLICATE_SYSTEM` | `true` | Enable collapsing duplicate system messages |
+| `PRUNING_DEDUPLICATE_SYSTEM` | `true` | Collapse duplicate system messages |
 | `PRUNING_TRUNCATE_CONVERSATION` | `true` | Enable conversation history truncation |
 
-### Response headers
+---
+
+## Response Headers
+
+The gateway appends custom tracking headers to upstream responses:
 
 | Header | When | Meaning |
 |---|---|---|
@@ -90,6 +155,7 @@ The gateway automatically prunes chat completion requests to reduce token consum
 | `X-Cache` | Always | `HIT` / `MISS` / `BYPASS` |
 | `X-Tokens-Saved` | Pruning enabled | Number of estimated tokens saved by pruning |
 | `X-Pruning-Applied` | Pruning enabled | Comma-separated list of applied pruning transforms (e.g. `whitespace,comments,dedup,truncation`) |
+
 
 ## Deterministic AST Extraction (Phase 5/6)
 
