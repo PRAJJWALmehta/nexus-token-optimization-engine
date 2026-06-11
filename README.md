@@ -91,3 +91,80 @@ The gateway automatically prunes chat completion requests to reduce token consum
 | `X-Tokens-Saved` | Pruning enabled | Number of estimated tokens saved by pruning |
 | `X-Pruning-Applied` | Pruning enabled | Comma-separated list of applied pruning transforms (e.g. `whitespace,comments,dedup,truncation`) |
 
+## Deterministic AST Extraction (Phase 5/6)
+
+The gateway parses Python and TypeScript files to extract functions, classes, and dependencies/imports using Tree-sitter. This builds a local dependency graph in Graphify format, which can be queried for code dependency trees.
+
+### AST Query API
+
+* **Endpoint**: `GET /api/ast/query`
+* **Query Parameters**:
+  * `node_id` (required): The starting node ID to query dependencies for (e.g., function, class, or file identifier).
+  * `depth` (optional, default: `2`, max: `10`): Max recursion depth to traverse outgoing dependencies.
+* **Response**: Returns a JSON object with `"nodes"` and `"links"` forming a subgraph of dependencies.
+
+### Local Graph Generation
+
+To verify AST parsing and generate/update the local knowledge graph:
+```bash
+python -m scratch.verify_ast
+```
+
+---
+
+## Telemetry & Observability (Phase 5)
+
+Nexus exports real-time metrics using Prometheus and includes a pre-configured Grafana dashboard for full system visibility (latency, cache statistics, token savings, routing breakdown, and AST query performance).
+
+### Running the Observability Stack
+
+Start Redis Stack, Prometheus, and Grafana via Docker Compose:
+```bash
+docker-compose up -d
+```
+
+* **Prometheus URL**: `http://localhost:9090`
+* **Grafana URL**: `http://localhost:3000` (default login: `admin` / `admin`)
+* **Gateway Metrics Endpoint**: `http://localhost:8000/metrics`
+
+---
+
+## Performance Benchmark Suite
+
+A performance load-testing suite designed to validate the caching mechanisms, latency (TTFT), and throughput under realistic or adversarial traffic.
+
+### 1. Data Collection (Offline Process)
+To ensure reliable, deterministic, and rapid benchmark runs without relying on live web requests, scrape the web once offline to create a rich static dataset of requests (`scratch/dummy_requests.jsonl`):
+```bash
+python -m scratch.data_collector
+```
+
+### 2. Running Benchmarks
+Run the load testing script against the running gateway:
+```bash
+python -m scratch.benchmark_runner [options]
+```
+
+#### CLI Options:
+* `--url`: Gateway endpoint URL (default: `http://localhost:8000/v1/chat/completions`).
+* `--dataset`: Path to the compiled jsonl dataset (default: `scratch/dummy_requests.jsonl`).
+* `--requests`: Total number of requests to dispatch (default: `30`).
+* `--concurrency`: Number of concurrent requests (default: `5`).
+* `--entropy`: Level of cache-busting entropy to inject (`none` or `high`, default: `none`). Set to `high` to inject unique nonces to guarantee a `<5%` cache hit rate.
+* `--model`: Model name to request (default: `gpt-4o`, set to `auto` to test dynamic routing).
+* `--stream`: Send requests in streaming mode (reports Time To First Token metrics).
+
+---
+
+## Running Tests
+
+To run the unit, integration, and E2E test suites:
+```bash
+# Run all tests
+pytest
+
+# Run a specific test suite
+pytest tests/unit/
+pytest tests/integration/
+pytest tests/e2e/
+```
