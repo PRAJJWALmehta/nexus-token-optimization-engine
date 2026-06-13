@@ -141,7 +141,7 @@ class CacheLookup:
             )
 
             # Telemetry instrumentation
-            from src.telemetry import cache_hits_total, tokens_saved_total
+            from src.telemetry import cache_hits_total, tokens_saved_total, tokens_processed_total, cost_saved_dollars_total, MODEL_PRICES
             from src.pruning.truncation import _estimate_total_tokens
             import json
 
@@ -158,8 +158,14 @@ class CacheLookup:
             else:
                 completion_tokens = len(entry.response) // 4
 
+            tokens_processed_total.labels(model=key.model).inc(completion_tokens)
             tokens_saved = prompt_tokens + completion_tokens
             tokens_saved_total.labels(model=key.model, source="caching").inc(tokens_saved)
+
+            # Record cost saved by caching (caching saves prompt + completion execution cost)
+            prices = MODEL_PRICES.get(key.model, MODEL_PRICES["default"])
+            caching_cost_saved = (prompt_tokens * prices["input"]) + (completion_tokens * prices["output"])
+            cost_saved_dollars_total.labels(model=key.model, source="caching").inc(caching_cost_saved)
 
             return CacheResult(
                 hit=True,

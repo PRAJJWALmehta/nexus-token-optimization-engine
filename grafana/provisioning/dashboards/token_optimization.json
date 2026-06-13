@@ -168,7 +168,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(tokens_saved_total) * 0.000045 or vector(0)",
+          "expr": "sum(cost_saved_dollars_total) or vector(0)",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
@@ -216,7 +216,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(tokens_saved_total) by (source)",
+          "expr": "sum(cost_saved_dollars_total) by (source)",
           "legendFormat": "{{source}}",
           "range": false,
           "instant": true,
@@ -250,7 +250,7 @@
               }
             ]
           },
-          "unit": "none"
+          "unit": "currencyUSD"
         },
         "overrides": []
       }
@@ -277,7 +277,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(tokens_saved_total) by (source)",
+          "expr": "sum(cost_saved_dollars_total) by (source)",
           "legendFormat": "{{source}}",
           "range": false,
           "instant": true,
@@ -320,7 +320,7 @@
             }
           },
           "mappings": [],
-          "unit": "short"
+          "unit": "currencyUSD"
         },
         "overrides": []
       }
@@ -347,7 +347,7 @@
             "uid": "Prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(tokens_saved_total[1m])) by (source)",
+          "expr": "sum(rate(cost_saved_dollars_total[1m])) by (source)",
           "legendFormat": "{{source}}",
           "range": true,
           "refId": "A"
@@ -371,7 +371,7 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "currencyUSD"
         },
         "overrides": []
       }

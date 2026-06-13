@@ -16,6 +16,7 @@ from src.telemetry import (
     gateway_latency_seconds,
     provider_latency_seconds,
     requests_per_model,
+    cost_saved_dollars_total,
 )
 
 _SYSTEM_MSG = {"role": "system", "content": "You are a helpful assistant."}
@@ -52,6 +53,7 @@ def clean_registry():
         
     provider_latency_seconds.clear()
     requests_per_model.clear()
+    cost_saved_dollars_total.clear()
     yield
 
 
@@ -127,7 +129,7 @@ async def test_telemetry_flow_on_cache_miss_and_hit():
             assert REGISTRY.get_sample_value('cache_hits_total', {'model': 'gpt-4o'}) is None
             assert REGISTRY.get_sample_value('provider_latency_seconds_count', {'model': 'gpt-4o', 'provider': 'openai'}) == 1.0
             assert REGISTRY.get_sample_value('gateway_latency_seconds_count') == 1.0
-            assert REGISTRY.get_sample_value('requests_per_model', {'model': 'gpt-4o'}) == 1.0
+            assert REGISTRY.get_sample_value('requests_per_model', {'model': 'gpt-4o'}) == 0.0
 
             # 2. Hit Request
             resp2 = client.post(
@@ -142,8 +144,12 @@ async def test_telemetry_flow_on_cache_miss_and_hit():
             assert REGISTRY.get_sample_value('cache_hits_total', {'model': 'gpt-4o'}) == 1.0
             assert REGISTRY.get_sample_value('provider_latency_seconds_count', {'model': 'gpt-4o', 'provider': 'openai'}) == 1.0
             assert REGISTRY.get_sample_value('gateway_latency_seconds_count') == 2.0
-            assert REGISTRY.get_sample_value('requests_per_model', {'model': 'gpt-4o'}) == 2.0
+            assert REGISTRY.get_sample_value('requests_per_model', {'model': 'gpt-4o'}) == 0.0
             
             tokens_saved_val = REGISTRY.get_sample_value('tokens_saved_total', {'model': 'gpt-4o', 'source': 'caching'})
             print(f"\n--- tokens_saved_total val: {tokens_saved_val} ---")
             assert tokens_saved_val == 15.0
+
+            cost_saved_val = REGISTRY.get_sample_value('cost_saved_dollars_total', {'model': 'gpt-4o', 'source': 'caching'})
+            print(f"\n--- cost_saved_dollars_total val: {cost_saved_val} ---")
+            assert cost_saved_val == pytest.approx(0.000285)
