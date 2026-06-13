@@ -199,26 +199,54 @@ docker-compose up -d
 
 A performance load-testing suite designed to validate the caching mechanisms, latency (TTFT), and throughput under realistic or adversarial traffic.
 
-### 1. Data Collection (Offline Process)
-To ensure reliable, deterministic, and rapid benchmark runs without relying on live web requests, scrape the web once offline to create a rich static dataset of requests (`scratch/dummy_requests.jsonl`):
+### Startup Tutorial: How to Run the Suite Manually
+
+#### Step 1: Start the Mock Upstream Server
+In a new terminal window, run the mock upstream server (listens on port `8001` by default):
 ```bash
-python -m scratch.data_collector
+python scratch/mock_upstream.py
 ```
 
-### 2. Running Benchmarks
-Run the load testing script against the running gateway:
+#### Step 2: Configure and Start the Token Optimizer Gateway
+In a separate terminal window, set the environment variables targeting the mock upstream and start the gateway server (listens on port `8000` by default):
 ```bash
-python -m scratch.benchmark_runner [options]
+export UPSTREAM_API_URL=http://127.0.0.1:8001/v1/chat/completions
+export UPSTREAM_API_KEY=mock-key-123
+export CACHE_ENABLED=true
+export REDIS_URL=redis://localhost:6379
+python -m src
 ```
 
-#### CLI Options:
+#### Step 3: Run the Data Collector (One-time Offline Scrape)
+Run the scraper once to harvest content and build the static dataset fixture (`scratch/dummy_requests.jsonl`):
+```bash
+python scratch/data_collector.py
+```
+
+#### Step 4: Run the Benchmark Suite
+You can run the benchmark runner in two modes:
+
+*   **Fixed Request Run**: Sends a specific number of requests and reports a summary:
+    ```bash
+    python scratch/benchmark_runner.py --url http://127.0.0.1:8000/v1/chat/completions --requests 30 --concurrency 2 --entropy high --stream
+    ```
+
+*   **Continuous Execution**: Runs continuously sending requests in a concurrency-limited loop, prompting for a keep-alive every hour (timeout exit in 60s):
+    ```bash
+    python scratch/benchmark_runner.py --url http://127.0.0.1:8000/v1/chat/completions --concurrency 2 --entropy high --continuous
+    ```
+
+### CLI Options:
 * `--url`: Gateway endpoint URL (default: `http://localhost:8000/v1/chat/completions`).
 * `--dataset`: Path to the compiled jsonl dataset (default: `scratch/dummy_requests.jsonl`).
-* `--requests`: Total number of requests to dispatch (default: `30`).
+* `--requests`: Total number of requests to dispatch (ignored in continuous mode, default: `30`).
 * `--concurrency`: Number of concurrent requests (default: `5`).
-* `--entropy`: Level of cache-busting entropy to inject (`none` or `high`, default: `none`). Set to `high` to inject unique nonces to guarantee a `<5%` cache hit rate.
+* `--entropy`: Level of cache-busting entropy to inject (`none` or `high`, default: `none`). Set to `high` to scramble prompts to guarantee a `1%` to `5%` cache hit rate.
 * `--model`: Model name to request (default: `gpt-4o`, set to `auto` to test dynamic routing).
 * `--stream`: Send requests in streaming mode (reports Time To First Token metrics).
+* `--continuous`: Runs the benchmark continuously in worker loops until stopped.
+* `--keep-alive-interval`: Seconds between keep-alive prompts in continuous mode (default: `3600.0` / 1 hour).
+* `--delay`: Delay in seconds between requests in worker loops (default: `0.2`).
 
 ---
 
