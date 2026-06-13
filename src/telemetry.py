@@ -20,6 +20,20 @@ tokens_saved_total = Counter(
     ["model", "source"]
 )
 
+# Cost saved counter (in USD)
+cost_saved_dollars_total = Counter(
+    "cost_saved_dollars_total",
+    "Total cost saved in USD",
+    ["model", "source"]
+)
+
+# Prices in USD per token (derived from $3/$15 per M for Sonnet, $15/$75 per M for Opus)
+MODEL_PRICES = {
+    "claude-sonnet-4-20250514": {"input": 0.000003, "output": 0.000015},
+    "claude-opus-4-0520": {"input": 0.000015, "output": 0.000075},
+    "default": {"input": 0.000015, "output": 0.000075}
+}
+
 # Total tokens processed counter
 tokens_processed_total = Counter(
     "tokens_processed_total",
