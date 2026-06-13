@@ -1,17 +1,25 @@
 """Chat completions router.
 
 Exposes ``POST /v1/chat/completions`` which accepts OpenAI-compatible requests
-and — depending on the routing and cache state — either:
+and — depending on the routing, pruning, and cache state — either:
 
-* **Routing + Cache HIT**:  Replays the cached response (SSE or JSON) without
-  touching the upstream provider.  Response carries ``X-Cache: HIT`` and
-  ``X-Cached-Model: <resolved-model>`` when the request was routed.
-* **Routing + Cache MISS**:  Forwards to the configured upstream provider with
-  the resolved model, buffers the response stream for cache persistence.
+* **Routing + Pruning + Cache HIT**:  Replays the cached response (SSE or JSON)
+  without touching the upstream provider.  Response carries ``X-Cache: HIT`` and
+  ``X-Cached-Model: <resolved-model>`` when the request was routed, plus pruning
+  headers when pruning was applied.
+* **Routing + Pruning + Cache MISS**:  Forwards to the configured upstream provider
+  with the resolved model, buffers the response stream for cache persistence.
   Response carries ``X-Cache: MISS`` and ``X-Routed-Model: <resolved-model>``.
 * **Cache BYPASS**: When caching is disabled via config, passes straight through.
   Response carries ``X-Cache: BYPASS`` (plus ``X-Routed-Model`` if routed).
 * **Routing disabled + trigger model**: Returns ``400 Bad Request`` immediately.
+
+Request pipeline:
+  Client → TenantMiddleware → ChatRouter
+        → [0] ModelRouter (optional)
+        → [1] PruningPipeline (optional, after routing, before cache)
+        → [2] CacheLookup (optional)
+        → [3] ProviderAdapter → Upstream
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ from src.config import Settings, settings
 from src.models.chat import ChatCompletionRequest, GatewayErrorDetail, GatewayErrorResponse
 from src.providers.base import ProviderAdapter
 from src.providers.openai import OpenAIProviderAdapter
+from src.pruning.pipeline import PruningPipeline, PruningResult
 from src.routing.router import ModelRouter, RoutingDisabledError, RoutingResult
 
 logger = logging.getLogger(__name__)
@@ -70,6 +79,28 @@ def get_model_router() -> ModelRouter:
 
 
 # ---------------------------------------------------------------------------
+# Pruning pipeline dependency
+# ---------------------------------------------------------------------------
+
+
+def get_pruning_pipeline() -> Optional[PruningPipeline]:
+    """Return a :class:`PruningPipeline` instance when pruning is enabled.
+
+    Returns ``None`` when ``PRUNING_ENABLED=false`` so the route handler
+    skips pruning transparently.
+    """
+    if not settings.pruning_enabled:
+        return None
+    return PruningPipeline(
+        normalize_whitespace=settings.pruning_normalize_whitespace,
+        strip_comments=settings.pruning_strip_comments,
+        deduplicate_system=settings.pruning_deduplicate_system,
+        truncate_conversation=settings.pruning_truncate_conversation,
+        token_budget=settings.pruning_token_budget,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Route
 # ---------------------------------------------------------------------------
 
@@ -81,11 +112,13 @@ async def chat_completions(
     provider: Annotated[ProviderAdapter, Depends(get_provider)],
     cache_lookup: Annotated[Optional[CacheLookup], Depends(get_cache_lookup)],
     model_router: Annotated[ModelRouter, Depends(get_model_router)],
+    pruning_pipeline: Annotated[Optional[PruningPipeline], Depends(get_pruning_pipeline)],
 ):
     """Proxy chat completions to the upstream LLM provider.
 
     Request flow:
-    1. Dynamic routing (optional) — resolves ``model: "auto"`` before cache.
+    0. Dynamic routing (optional) — resolves ``model: "auto"`` before pruning/cache.
+    1. Prompt pruning (optional) — reduces token count before cache key computation.
     2. Cache check — returns cached response on HIT.
     3. Upstream forward — on MISS/BYPASS, forward to provider and cache result.
 
@@ -93,104 +126,254 @@ async def chat_completions(
     - ``X-Cache``: HIT / MISS / BYPASS
     - ``X-Routed-Model``: resolved model name (cache MISS/BYPASS, routed only)
     - ``X-Cached-Model``: resolved model name (cache HIT, routed only)
+    - ``X-Tokens-Saved``: integer tokens saved by pruning (when pruning enabled)
+    - ``X-Pruning-Applied``: comma-separated transforms applied (when pruning enabled)
     """
+    import time
+    start_time = time.perf_counter()
+
     tenant_id: str = getattr(request.state, "tenant_id", "default")
 
-    # ------------------------------------------------------------------ #
-    #  0.  Dynamic routing (before cache — resolves model in place)       #
-    # ------------------------------------------------------------------ #
-    routing_result: RoutingResult = RoutingResult(routed_model=None)
+    from src.pruning.truncation import _estimate_total_tokens
+    
+    total_tokens_est = _estimate_total_tokens(request_data.messages)
+
+    active_model = None
+    is_streaming = False
+
     try:
-        routing_result = model_router.resolve(request_data)
-    except RoutingDisabledError as exc:
-        return JSONResponse(
-            status_code=400,
-            content=GatewayErrorResponse(
-                error=GatewayErrorDetail(
-                    message=str(exc),
-                    type="routing_disabled",
-                    code="400",
-                )
-            ).model_dump(),
-        )
-
-    # ------------------------------------------------------------------ #
-    #  1.  Cache check (skipped when lookup is None / disabled)           #
-    # ------------------------------------------------------------------ #
-    result: CacheResult | None = None
-    client_cache_control = request.headers.get("cache-control", "").lower()
-
-    if (
-        cache_lookup is not None
-        and "no-cache" not in client_cache_control
-        and "no-store" not in client_cache_control
-    ):
-        result = await cache_lookup.check(request_data, tenant_id)
-
-        if result.hit:
-            logger.info("Serving cache HIT for tenant=%s", tenant_id)
-            hit_headers = {"X-Cache": "HIT"}
-            if routing_result.was_routed:
-                hit_headers["X-Cached-Model"] = routing_result.routed_model
-
-            if request_data.stream:
-                return StreamingResponse(
-                    replay_sse_stream(result.cached_response),
-                    media_type="text/event-stream",
-                    headers=hit_headers,
-                )
-            else:
-                return replay_json_response(
-                    result.cached_response,
-                    extra_headers=hit_headers,
-                )
-
-    # ------------------------------------------------------------------ #
-    #  2.  Cache MISS or BYPASS — forward to upstream                     #
-    # ------------------------------------------------------------------ #
-    client_bypassed = (
-        "no-cache" in client_cache_control or "no-store" in client_cache_control
-    )
-    x_cache_header = (
-        "MISS" if cache_lookup is not None and not client_bypassed else "BYPASS"
-    )
-
-    # Build extra headers for the miss/bypass response
-    extra_headers: dict[str, str] = {"X-Cache": x_cache_header}
-    if routing_result.was_routed:
-        extra_headers["X-Routed-Model"] = routing_result.routed_model
-
-    if request_data.stream:
-        # Build the on_complete callback to persist the response after delivery
-        async def _persist_stream(data: bytes) -> None:
-            if cache_lookup is not None and result is not None and result.key is not None:
-                await cache_lookup.store(result.key, request_data, data, stream=True)
-
-        buffered = StreamBuffer(
-            provider.stream_completions(request_data),
-            on_complete=_persist_stream if cache_lookup is not None else None,
-        )
-        return StreamingResponse(
-            buffered,
-            media_type="text/event-stream",
-            headers=extra_headers,
-        )
-    else:
-        # Non-streaming: collect response then optionally cache it
-        chunks = []
-        async for chunk in provider.stream_completions(request_data):
-            chunks.append(chunk)
-
-        body = b"".join(chunks)
-
-        # Persist to cache asynchronously
-        if cache_lookup is not None and result is not None and result.key is not None:
-            import asyncio
-            asyncio.create_task(
-                cache_lookup.store(result.key, request_data, body, stream=False)
+        # ------------------------------------------------------------------ #
+        #  0.  Dynamic routing (before pruning/cache — resolves model)        #
+        # ------------------------------------------------------------------ #
+        original_model = request_data.model
+        routing_result: RoutingResult = RoutingResult(routed_model=None)
+        try:
+            routing_result = model_router.resolve(request_data)
+        except RoutingDisabledError as exc:
+            from src.telemetry import gateway_latency_seconds
+            gateway_latency_seconds.observe(time.perf_counter() - start_time)
+            return JSONResponse(
+                status_code=400,
+                content=GatewayErrorResponse(
+                    error=GatewayErrorDetail(
+                        message=str(exc),
+                        type="routing_disabled",
+                        code="400",
+                    )
+                ).model_dump(),
             )
 
-        return JSONResponse(
-            content=json.loads(body),
-            headers=extra_headers,
+        active_model = request_data.model
+        
+        # Record prompt tokens processed under the resolved model
+        from src.telemetry import tokens_processed_total
+        tokens_processed_total.labels(model=active_model).inc(total_tokens_est)
+
+        # ------------------------------------------------------------------ #
+        #  1.  Prompt pruning (after routing, before cache)                   #
+        # ------------------------------------------------------------------ #
+        pruning_result: Optional[PruningResult] = None
+        if pruning_pipeline is not None:
+            pruning_result = pruning_pipeline.run(request_data, tenant_id=tenant_id)
+            request_data = pruning_result.request  # operate on pruned request from here
+
+            # Record tokens and cost saved by pruning
+            if pruning_result.tokens_saved > 0:
+                from src.telemetry import tokens_saved_total, cost_saved_dollars_total, MODEL_PRICES
+                tokens_saved_total.labels(model=request_data.model, source="pruning").inc(pruning_result.tokens_saved)
+                # Determine baseline model before routing to calculate actual pruning savings
+                baseline_model = "claude-opus-4-0520" if original_model == "auto" else original_model
+                prices = MODEL_PRICES.get(baseline_model, MODEL_PRICES["default"])
+                pruning_cost_saved = pruning_result.tokens_saved * prices["input"]
+                cost_saved_dollars_total.labels(model=request_data.model, source="pruning").inc(pruning_cost_saved)
+
+        # ------------------------------------------------------------------ #
+        #  2.  Cache check (skipped when lookup is None / disabled)           #
+        # ------------------------------------------------------------------ #
+        result: CacheResult | None = None
+        client_cache_control = request.headers.get("cache-control", "").lower()
+
+        # Latency tracking wrappers for streaming responses
+        async def track_gateway_latency_stream(gen):
+            try:
+                async for chunk in gen:
+                    yield chunk
+            finally:
+                if active_model:
+                    from src.telemetry import requests_per_model
+                    requests_per_model.labels(model=active_model).dec()
+                from src.telemetry import gateway_latency_seconds
+                gateway_latency_seconds.observe(time.perf_counter() - start_time)
+
+        async def track_provider_latency_stream(gen):
+            prov_start = time.perf_counter()
+            try:
+                async for chunk in gen:
+                    yield chunk
+            finally:
+                from src.telemetry import provider_latency_seconds
+                provider_latency_seconds.labels(
+                    provider=getattr(provider, "name", "openai"),
+                    model=request_data.model
+                ).observe(time.perf_counter() - prov_start)
+
+        if (
+            cache_lookup is not None
+            and "no-cache" not in client_cache_control
+            and "no-store" not in client_cache_control
+        ):
+            result = await cache_lookup.check(request_data, tenant_id)
+
+            if result.hit:
+                logger.info("Serving cache HIT for tenant=%s", tenant_id)
+                hit_headers = {"X-Cache": "HIT"}
+                if routing_result.was_routed:
+                    hit_headers["X-Cached-Model"] = routing_result.routed_model
+                if pruning_result is not None:
+                    hit_headers["X-Tokens-Saved"] = str(pruning_result.tokens_saved)
+                    hit_headers["X-Pruning-Applied"] = ",".join(pruning_result.transforms_applied)
+
+                # Record routing cost savings on cache hit if routed to low model
+                if routing_result.was_routed and routing_result.routed_model == settings.routing_low_model:
+                    from src.pruning.truncation import _estimate_total_tokens
+                    prompt_tokens = _estimate_total_tokens(request_data.messages)
+                    completion_tokens = 0
+                    try:
+                        data = json.loads(result.cached_response.decode("utf-8", errors="replace"))
+                        completion_tokens = data.get("usage", {}).get("completion_tokens", 0)
+                    except Exception:
+                        completion_tokens = len(result.cached_response) // 4
+                    
+                    from src.telemetry import cost_saved_dollars_total, MODEL_PRICES
+                    opus_prices = MODEL_PRICES["claude-opus-4-0520"]
+                    sonnet_prices = MODEL_PRICES["claude-sonnet-4-20250514"]
+                    input_diff = opus_prices["input"] - sonnet_prices["input"]
+                    output_diff = opus_prices["output"] - sonnet_prices["output"]
+                    routing_cost_saved = (prompt_tokens * input_diff) + (completion_tokens * output_diff)
+                    cost_saved_dollars_total.labels(model=routing_result.routed_model, source="routing").inc(routing_cost_saved)
+
+                if request_data.stream:
+                    is_streaming = True
+                    return StreamingResponse(
+                        track_gateway_latency_stream(replay_sse_stream(result.cached_response)),
+                        media_type="text/event-stream",
+                        headers=hit_headers,
+                    )
+                else:
+                    from src.telemetry import gateway_latency_seconds
+                    gateway_latency_seconds.observe(time.perf_counter() - start_time)
+                    return replay_json_response(
+                        result.cached_response,
+                        extra_headers=hit_headers,
+                    )
+
+        # ------------------------------------------------------------------ #
+        #  3.  Cache MISS or BYPASS — forward to upstream                     #
+        # ------------------------------------------------------------------ #
+        client_bypassed = (
+            "no-cache" in client_cache_control or "no-store" in client_cache_control
         )
+        x_cache_header = (
+            "MISS" if cache_lookup is not None and not client_bypassed else "BYPASS"
+        )
+
+        # Build extra headers for the miss/bypass response
+        extra_headers: dict[str, str] = {"X-Cache": x_cache_header}
+        if routing_result.was_routed:
+            extra_headers["X-Routed-Model"] = routing_result.routed_model
+        if pruning_result is not None:
+            extra_headers["X-Tokens-Saved"] = str(pruning_result.tokens_saved)
+            extra_headers["X-Pruning-Applied"] = ",".join(pruning_result.transforms_applied)
+
+        if request_data.stream:
+            # Build the on_complete callback to persist response & record telemetry after delivery
+            async def _stream_complete(data: bytes) -> None:
+                if cache_lookup is not None and result is not None and result.key is not None:
+                    await cache_lookup.store(result.key, request_data, data, stream=True)
+                
+                completion_tokens = len(data) // 4
+                from src.telemetry import tokens_processed_total
+                tokens_processed_total.labels(model=request_data.model).inc(completion_tokens)
+
+                # Record cost saved by routing to cheaper model
+                if routing_result.was_routed and routing_result.routed_model == settings.routing_low_model:
+                    from src.pruning.truncation import _estimate_total_tokens
+                    prompt_tokens = _estimate_total_tokens(request_data.messages)
+                    from src.telemetry import cost_saved_dollars_total, MODEL_PRICES
+                    opus_prices = MODEL_PRICES["claude-opus-4-0520"]
+                    sonnet_prices = MODEL_PRICES["claude-sonnet-4-20250514"]
+                    input_diff = opus_prices["input"] - sonnet_prices["input"]
+                    output_diff = opus_prices["output"] - sonnet_prices["output"]
+                    routing_cost_saved = (prompt_tokens * input_diff) + (completion_tokens * output_diff)
+                    cost_saved_dollars_total.labels(model=routing_result.routed_model, source="routing").inc(routing_cost_saved)
+
+
+
+            buffered = StreamBuffer(
+                track_provider_latency_stream(provider.stream_completions(request_data)),
+                on_complete=_stream_complete,
+            )
+            is_streaming = True
+            return StreamingResponse(
+                track_gateway_latency_stream(buffered),
+                media_type="text/event-stream",
+                headers=extra_headers,
+            )
+        else:
+            # Non-streaming: collect response then optionally cache it
+            chunks = []
+            prov_start = time.perf_counter()
+            async for chunk in provider.stream_completions(request_data):
+                chunks.append(chunk)
+
+            prov_duration = time.perf_counter() - prov_start
+            from src.telemetry import provider_latency_seconds
+            provider_latency_seconds.labels(
+                provider=getattr(provider, "name", "openai"),
+                model=request_data.model
+            ).observe(prov_duration)
+
+            body = b"".join(chunks)
+
+            # Persist to cache asynchronously
+            if cache_lookup is not None and result is not None and result.key is not None:
+                import asyncio
+                asyncio.create_task(
+                    cache_lookup.store(result.key, request_data, body, stream=False)
+                )
+
+            completion_tokens = 0
+            try:
+                data = json.loads(body.decode("utf-8", errors="replace"))
+                completion_tokens = data.get("usage", {}).get("completion_tokens", 0)
+            except Exception:
+                completion_tokens = len(body) // 4
+
+            from src.telemetry import tokens_processed_total
+            tokens_processed_total.labels(model=request_data.model).inc(completion_tokens)
+
+            # Record cost saved by routing to cheaper model
+            if routing_result.was_routed and routing_result.routed_model == settings.routing_low_model:
+                from src.pruning.truncation import _estimate_total_tokens
+                prompt_tokens = _estimate_total_tokens(request_data.messages)
+                from src.telemetry import cost_saved_dollars_total, MODEL_PRICES
+                opus_prices = MODEL_PRICES["claude-opus-4-0520"]
+                sonnet_prices = MODEL_PRICES["claude-sonnet-4-20250514"]
+                input_diff = opus_prices["input"] - sonnet_prices["input"]
+                output_diff = opus_prices["output"] - sonnet_prices["output"]
+                routing_cost_saved = (prompt_tokens * input_diff) + (completion_tokens * output_diff)
+                cost_saved_dollars_total.labels(model=routing_result.routed_model, source="routing").inc(routing_cost_saved)
+
+
+
+            from src.telemetry import gateway_latency_seconds
+            gateway_latency_seconds.observe(time.perf_counter() - start_time)
+
+            return JSONResponse(
+                content=json.loads(body),
+                headers=extra_headers,
+            )
+    finally:
+        if not is_streaming and active_model:
+            from src.telemetry import requests_per_model
+            requests_per_model.labels(model=active_model).dec()

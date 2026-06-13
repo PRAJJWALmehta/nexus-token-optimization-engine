@@ -5,7 +5,7 @@ This checklist breaks down the Master PRD into small, testable OpenSpec changes.
 ## Phase 1: Core Proxy Gateway 🌐
 **Goal**: A functional pass-through proxy. Proves the gateway works end-to-end.
 
-- [ ] **Change**: `proxy-scaffold`
+- [x] **Change**: `proxy-scaffold`
   - FastAPI scaffold with `POST /v1/chat/completions`
   - OpenAI-compatible request/response Pydantic models
   - Tenant ID extraction middleware (from API key prefix)
@@ -17,7 +17,7 @@ This checklist breaks down the Master PRD into small, testable OpenSpec changes.
 ## Phase 2: Semantic Caching 🧠
 **Goal**: Cache duplicate queries. Biggest ROI.
 
-- [ ] **Change**: `semantic-caching`
+- [x] **Change**: `semantic-caching`
   - `all-MiniLM-L6-v2` local embedding engine (embed last user message)
   - Redis with RediSearch vector index (running via OrbStack)
   - Cache key builder (tenant_id + sys_prompt_hash + model + temp_bucket + ctx_hash)
@@ -29,7 +29,7 @@ This checklist breaks down the Master PRD into small, testable OpenSpec changes.
 ## Phase 3: Dynamic Routing 🔀
 **Goal**: Cost optimization via intelligent model selection.
 
-- [ ] **Change**: `dynamic-routing`
+- [x] **Change**: `dynamic-routing`
   - Heuristic complexity classifier (token count + keyword signals)
   - Model routing logic (< 2000 tokens → Sonnet, ≥ 2000 → Opus)
   - Configurable routing rules via env vars
@@ -38,7 +38,7 @@ This checklist breaks down the Master PRD into small, testable OpenSpec changes.
 ## Phase 4: Prompt Pruning 🗜️
 **Goal**: Token reduction without ML. Fast, deterministic.
 
-- [ ] **Change**: `prompt-pruning`
+- [x] **Change**: `prompt-pruning`
   - Whitespace normalization
   - Code comment stripping from content blocks
   - Duplicate system instruction deduplication
@@ -49,7 +49,7 @@ This checklist breaks down the Master PRD into small, testable OpenSpec changes.
 ## Phase 5: Telemetry & Observability 📊
 **Goal**: Measure cost savings, latency, and cache hit rates.
 
-- [ ] **Change**: `telemetry-instrumentation`
+- [x] **Change**: `telemetry-instrumentation`
   - Prometheus counters: `cache_hits_total`, `cache_misses_total`, `tokens_saved_total`
   - Prometheus histograms: `gateway_latency_seconds`, `provider_latency_seconds`
   - Routing distribution gauge: requests per model
@@ -59,7 +59,7 @@ This checklist breaks down the Master PRD into small, testable OpenSpec changes.
 ## Phase 6: AST Extraction 🌳 (Future)
 **Goal**: Deterministic codebase parsing. Deferred until core layers are stable.
 
-- [ ] **Change**: `ast-extractor`
+- [x] **Change**: `ast-extractor`
   - Tree-sitter bindings (Python, TypeScript)
   - AST extraction (functions, classes, imports)
   - Local dependency graph storage (Graphify)

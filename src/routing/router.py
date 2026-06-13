@@ -116,10 +116,14 @@ class ModelRouter:
                     "Dynamic routing is disabled; specify a concrete model name"
                 )
             # Non-trigger model with routing disabled → pass through
+            from src.telemetry import requests_per_model
+            requests_per_model.labels(model=original_model).inc()
             return RoutingResult(routed_model=None)
 
         # Not the trigger model → bypass routing
         if original_model != s.routing_trigger_model:
+            from src.telemetry import requests_per_model
+            requests_per_model.labels(model=original_model).inc()
             return RoutingResult(routed_model=None)
 
         # Classify and resolve
@@ -131,6 +135,9 @@ class ModelRouter:
 
         # Mutate in place
         request.model = resolved
+
+        from src.telemetry import requests_per_model
+        requests_per_model.labels(model=resolved).inc()
 
         logger.info(
             "Routing decision: model=%s → resolved=%s, complexity=%s, "

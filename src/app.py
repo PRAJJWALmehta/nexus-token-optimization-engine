@@ -28,7 +28,8 @@ from fastapi import FastAPI
 from src.config import settings
 from src.exceptions import register_exception_handlers
 from src.middleware.tenant import TenantExtractionMiddleware
-from src.routers import chat, health
+from src.routers import chat, health, ast
+
 
 # Configure logging
 logging.basicConfig(
@@ -121,6 +122,11 @@ def create_app() -> FastAPI:
     # 3. Include routers
     app.include_router(health.router)
     app.include_router(chat.router)
+    app.include_router(ast.router)
+
+    # 4. Mount Prometheus metrics endpoint
+    from prometheus_client import make_asgi_app
+    app.mount("/metrics", make_asgi_app())
 
     return app
 
