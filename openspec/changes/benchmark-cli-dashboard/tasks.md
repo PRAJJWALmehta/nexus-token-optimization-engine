@@ -17,3 +17,9 @@
 
 - [x] 4.1 Write the dark-mode, responsive HTML template with embedded styling, donut gradients, and count-up animations.
 - [x] 4.2 Populate the template with run results, save the report to `scratch/benchmark_report.html`, and open it in the default browser.
+
+## 5. Live Scorecard Dashboard Server
+
+- [x] 5.1 Implement a lightweight FastAPI application inside `scratch/benchmark_cli.py` with an SSE streaming endpoint `/events`.
+- [x] 5.2 Implement uvicorn background thread runner and JS EventSource listener in the HTML template to dynamically redraw SVG charts and update text contents.
+

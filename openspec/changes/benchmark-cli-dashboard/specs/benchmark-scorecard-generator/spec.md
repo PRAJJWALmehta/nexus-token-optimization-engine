@@ -24,3 +24,11 @@ The system SHALL generate a self-contained, offline-compatible HTML file contain
 #### Scenario: Report file generation
 - **WHEN** the benchmark run completes
 - **THEN** the system SHALL write a styled HTML file containing inline CSS and JS, populating the cost reduction percentage, tokens saved, cache hits/misses distribution, routing distribution, pruning breakdown, and latency profile, and attempt to open it in a web browser.
+
+### Requirement: Real-Time Scorecard Server
+The system SHALL run a lightweight local HTTP server during the benchmark run to stream real-time progress to the opened web browser dashboard using Server-Sent Events (SSE).
+
+#### Scenario: Server-Sent Events update stream
+- **WHEN** the benchmark CLI starts a run
+- **THEN** the system SHALL launch a local FastAPI server in a background thread, open the browser to the dashboard URL, and stream incremental metrics via an SSE endpoint as each concurrent task completes.
+
